@@ -12,9 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::{ffi, ColumnFamily};
+use crate::{ffi, ColumnFamily, Error};
 use libc::{c_char, c_void, size_t};
 use std::slice;
+use std::ptr::slice_from_raw_parts;
 
 /// An atomic batch of write operations.
 ///
@@ -91,6 +92,34 @@ impl WriteBatch {
         }
     }
 
+    /// Tries to serialize writebatch as raw bytes vector with null values
+    /// there is no need to use CString or null add for reverse conversion.
+    /// Its useful for sending write batches over network.
+    pub fn try_into_raw(&self) -> Result<Vec<u8>, Error> {
+        let data;
+        unsafe {
+            let mut repsize1: size_t = 0;
+            let rep: *const i8 = ffi::rocksdb_writebatch_data(self.inner, &mut repsize1);
+            let cs = slice_from_raw_parts(rep as *const u8, repsize1);
+            data = cs.as_ref().ok_or_else(|| {
+                Error::new("writeBatch reference is Null".to_string())
+            })?.to_vec();
+        }
+        Ok(data)
+    }
+
+    /// creates writeBatch from raw input,
+    /// improperly null terminated data leads to panic.
+    /// useful for data-replication.
+    pub fn from_raw(data: &[u8]) -> Self {
+        let u8slice = unsafe {
+            &*(data as *const _ as *const [i8])
+        };
+        WriteBatch {
+            inner: unsafe { ffi::rocksdb_writebatch_create_from(u8slice.as_ptr(), data.len() as size_t) }
+        }
+    }
+
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
@@ -116,9 +145,9 @@ impl WriteBatch {
 
     /// Insert a value into the database under the given key.
     pub fn put<K, V>(&mut self, key: K, value: V)
-    where
-        K: AsRef<[u8]>,
-        V: AsRef<[u8]>,
+        where
+            K: AsRef<[u8]>,
+            V: AsRef<[u8]>,
     {
         let key = key.as_ref();
         let value = value.as_ref();
@@ -135,9 +164,9 @@ impl WriteBatch {
     }
 
     pub fn put_cf<K, V>(&mut self, cf: &ColumnFamily, key: K, value: V)
-    where
-        K: AsRef<[u8]>,
-        V: AsRef<[u8]>,
+        where
+            K: AsRef<[u8]>,
+            V: AsRef<[u8]>,
     {
         let key = key.as_ref();
         let value = value.as_ref();
@@ -155,9 +184,9 @@ impl WriteBatch {
     }
 
     pub fn merge<K, V>(&mut self, key: K, value: V)
-    where
-        K: AsRef<[u8]>,
-        V: AsRef<[u8]>,
+        where
+            K: AsRef<[u8]>,
+            V: AsRef<[u8]>,
     {
         let key = key.as_ref();
         let value = value.as_ref();
@@ -174,9 +203,9 @@ impl WriteBatch {
     }
 
     pub fn merge_cf<K, V>(&mut self, cf: &ColumnFamily, key: K, value: V)
-    where
-        K: AsRef<[u8]>,
-        V: AsRef<[u8]>,
+        where
+            K: AsRef<[u8]>,
+            V: AsRef<[u8]>,
     {
         let key = key.as_ref();
         let value = value.as_ref();
@@ -281,3 +310,27 @@ impl Drop for WriteBatch {
 }
 
 unsafe impl Send for WriteBatch {}
+
+#[cfg(test)]
+mod test {
+    use crate::WriteBatch;
+
+    #[test]
+    fn test_serialize() {
+        let maybe_vec = {
+            let mut wb = WriteBatch::default();
+            let (k, v) = ("fffikey", "ffie-value");
+            wb.put(k.as_bytes(), v.as_bytes());
+            wb.put(k.as_bytes(), v.as_bytes());
+            assert_eq!(wb.size_in_bytes(), 52);
+            wb.try_into_raw()
+        };
+        assert_eq!(maybe_vec.is_ok(), true);
+        let mut new_wb =  {
+            WriteBatch::from_raw(maybe_vec.unwrap().as_slice())
+        };
+        assert_eq!(new_wb.size_in_bytes(), 52);
+        new_wb.put("k1".as_bytes(), "k2".as_bytes());
+        assert_eq!(new_wb.size_in_bytes(), 59);
+    }
+}
